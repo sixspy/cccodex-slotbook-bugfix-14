@@ -1,0 +1,5 @@
+[
+  {"code":"S-AM-01","title":"上午一档","start_at":"2026-11-21T09:00:00","end_at":"2026-11-21T11:00:00","capacity":10,"booked":0,"status":"开放","generation":1},
+  {"code":"S-PM-02","title":"下午二档","start_at":"2026-11-21T14:00:00","end_at":"2026-11-21T16:00:00","capacity":8,"booked":0,"status":"开放","generation":1},
+  {"code":"S-EVE-03","title":"晚间三档","start_at":"2026-11-21T19:00:00","end_at":"2026-11-21T21:00:00","capacity":6,"booked":0,"status":"开放","generation":1}
+]
