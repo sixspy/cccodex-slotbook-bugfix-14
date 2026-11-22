@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS slots(
   end_at TEXT NOT NULL,
   capacity INTEGER NOT NULL,
   booked INTEGER NOT NULL DEFAULT 0,
+  remaining INTEGER,
   status TEXT NOT NULL,
   generation INTEGER NOT NULL DEFAULT 1
 );
@@ -213,6 +214,23 @@ def seed_if_empty(conn) -> None:
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         ensure_users(conn)
         seed_if_empty(conn)
+        _recompute_all(conn)
         conn.commit()
+
+
+def _migrate(conn) -> None:
+    """BUGFIX-14：老库补 remaining 展示列。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(slots)").fetchall()}
+    if "remaining" not in cols:
+        conn.execute("ALTER TABLE slots ADD COLUMN remaining INTEGER")
+
+
+def _recompute_all(conn) -> None:
+    """按余席同事务重算口径回填展示余席（扣待确认）。"""
+    from remaining_svc import recompute_remaining
+
+    for row in conn.execute("SELECT id FROM slots").fetchall():
+        recompute_remaining(conn, row["id"])

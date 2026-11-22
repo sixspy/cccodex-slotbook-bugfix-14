@@ -24,6 +24,7 @@ createApp({
     const bookings = ref([]);
     const recon = ref({});
     const audits = ref([]);
+    const auditRemaining = ref([]);
     const contention = ref([]);
     const dash = ref({});
     const holdForm = ref({ slot_code: "S-AM-01", party_key: "P-NEW", seats: 1 });
@@ -62,7 +63,9 @@ createApp({
       waitlist.value = (await api.get("/api/waitlist")).items;
       bookings.value = (await api.get("/api/bookings")).items;
       recon.value = await api.get("/api/reconcile");
-      audits.value = (await api.get("/api/audit")).items;
+      const auditRes = await api.get("/api/audit");
+      audits.value = auditRes.items;
+      auditRemaining.value = auditRes.remaining || [];
       contention.value = (await api.get("/api/contention")).items;
     }
 
@@ -83,7 +86,7 @@ createApp({
 
     return {
       token, user, username, password, err, actionErr, tab, nav,
-      slots, holds, waitlist, bookings, recon, audits, contention, dash,
+      slots, holds, waitlist, bookings, recon, audits, auditRemaining, contention, dash,
       holdForm, confirmId, login, logout, refresh, doHold, doConfirm, promoteWait,
     };
   },

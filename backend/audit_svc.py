@@ -5,19 +5,30 @@ from fastapi import APIRouter
 
 from auth import AuthHeader, require_user
 from db import connect
+from remaining_svc import read_remaining_locked, recompute_all
 
 router = APIRouter(tags=["audit"])
 
 
 @router.get("/api/audit")
 def list_audit(authorization: AuthHeader = None, limit: int = 100):
-    require_user(authorization)
+    user = require_user(authorization)
     lim = max(1, min(limit, 500))
-    with connect() as conn:
+    with read_remaining_locked(user) as conn:
+        recompute_all(conn)
+        conn.commit()
         rows = conn.execute(
             "SELECT * FROM audit_trail ORDER BY id DESC LIMIT ?", (lim,)
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        remaining = conn.execute(
+            "SELECT code AS slot_code, capacity, booked, remaining, status "
+            "FROM slots ORDER BY code"
+        ).fetchall()
+        return {
+            "items": [dict(r) for r in rows],
+            # 审计页余席读面：与档期行写回值同源
+            "remaining": [dict(r) for r in remaining],
+        }
 
 
 @router.get("/api/proof/{party_key}")

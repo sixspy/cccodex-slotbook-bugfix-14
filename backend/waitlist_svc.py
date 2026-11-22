@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from auth import AuthHeader, require_user, require_writer
 from db import connect, write_audit
 from locks import release, require_lock
+from remaining_svc import pending_seats, read_remaining_locked, recompute_remaining
 
 router = APIRouter(tags=["waitlist"])
 
@@ -23,11 +24,12 @@ class PromoteIn(BaseModel):
 
 @router.get("/api/waitlist")
 def list_wait(authorization: AuthHeader = None):
-    require_user(authorization)
-    with connect() as conn:
+    user = require_user(authorization)
+    with read_remaining_locked(user) as conn:
         rows = conn.execute(
-            """SELECT w.*, s.code AS slot_code FROM waitlist w
-               JOIN slots s ON s.id=w.slot_id ORDER BY w.id DESC LIMIT 200"""
+            """SELECT w.*, s.code AS slot_code, s.remaining AS remaining
+               FROM waitlist w JOIN slots s ON s.id=w.slot_id
+               ORDER BY w.id DESC LIMIT 200"""
         ).fetchall()
         return {"items": [dict(r) for r in rows]}
 
@@ -63,10 +65,7 @@ def promote_wait(body: PromoteIn, authorization: AuthHeader = None):
         try:
             if wrow["status"] != "候补中":
                 raise HTTPException(409, "候补非候补中")
-            pending = conn.execute(
-                "SELECT COALESCE(SUM(seats),0) s FROM holds WHERE slot_id=? AND status='占位中'",
-                (slot["id"],),
-            ).fetchone()["s"]
+            pending = pending_seats(conn, slot["id"])
             free = int(slot["capacity"]) - int(slot["booked"]) - int(pending)
             if wrow["seats"] > free:
                 raise HTTPException(409, "仍无足够空位，禁止晋升")
@@ -90,8 +89,15 @@ def promote_wait(body: PromoteIn, authorization: AuthHeader = None):
                 wrow["party_key"],
                 {"hold_id": cur.lastrowid},
             )
+            remaining = recompute_remaining(conn, slot["id"])
             conn.commit()
-            return {"ok": True, "hold_id": cur.lastrowid}
+            return {"ok": True, "hold_id": cur.lastrowid, "remaining": remaining}
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             release(conn, lock_key, user)
             conn.commit()

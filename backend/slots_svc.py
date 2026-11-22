@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from auth import AuthHeader, require_user, require_writer
 from db import connect, write_audit
 from locks import release, require_lock
+from remaining_svc import read_remaining_locked, recompute_all, recompute_remaining
 
 router = APIRouter(tags=["slots"])
 
@@ -27,8 +28,10 @@ class CloseIn(BaseModel):
 
 @router.get("/api/slots")
 def list_slots(authorization: AuthHeader = None):
-    require_user(authorization)
-    with connect() as conn:
+    user = require_user(authorization)
+    with read_remaining_locked(user) as conn:
+        recompute_all(conn)
+        conn.commit()
         rows = conn.execute(
             "SELECT * FROM slots ORDER BY start_at, code"
         ).fetchall()
@@ -37,15 +40,16 @@ def list_slots(authorization: AuthHeader = None):
 
 @router.get("/api/slots/{code}")
 def get_slot(code: str, authorization: AuthHeader = None):
-    require_user(authorization)
-    with connect() as conn:
+    user = require_user(authorization)
+    with read_remaining_locked(user, [code]) as conn:
         row = conn.execute("SELECT * FROM slots WHERE code=?", (code,)).fetchone()
         if not row:
             raise HTTPException(404, "档期不存在")
-        d = dict(row)
-        # BUGFIX-14 埋雷：余席漏扣待确认占位
-        d["remaining"] = max(0, int(d["capacity"]) - int(d["booked"]))
-        return d
+        recompute_remaining(conn, row["id"])
+        conn.commit()
+        return dict(
+            conn.execute("SELECT * FROM slots WHERE code=?", (code,)).fetchone()
+        )
 
 
 @router.post("/api/slots")
@@ -66,8 +70,18 @@ def create_slot(body: SlotIn, authorization: AuthHeader = None):
                    VALUES (?,?,?,?,?,0,'开放',1)""",
                 (body.code, body.title, body.start_at, body.end_at, body.capacity),
             )
+            new_id = conn.execute(
+                "SELECT id FROM slots WHERE code=?", (body.code,)
+            ).fetchone()["id"]
+            recompute_remaining(conn, new_id)
             write_audit(conn, user, "slot_create", body.code, body.model_dump())
             conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             release(conn, f"slot:{body.code}", user)
             conn.commit()
@@ -98,6 +112,12 @@ def close_slot(body: CloseIn, authorization: AuthHeader = None):
             )
             write_audit(conn, user, "slot_close", body.code, {"generation": row["generation"]})
             conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             release(conn, f"slot:{body.code}", user)
             conn.commit()

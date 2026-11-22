@@ -1,0 +1,8 @@
+{
+  "slot_code": "S-PM-02",
+  "capacity": 8,
+  "booked": 0,
+  "pending_seats": 2,
+  "inflated_remaining": 8,
+  "expected_remaining": 6
+}

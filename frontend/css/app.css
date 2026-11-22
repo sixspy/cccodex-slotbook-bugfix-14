@@ -70,6 +70,7 @@ input, select {
 .dash { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.6rem; margin-bottom: 1rem; }
 .dash .cell { background: #fff; border: 1px dashed var(--line); padding: 0.7rem; text-align: center; }
 .dash .n { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
+td.num { font-weight: 700; color: var(--accent); }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; }
   .dash { grid-template-columns: 1fr 1fr; }

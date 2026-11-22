@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from auth import AuthHeader, require_user, require_writer
 from db import connect, write_audit
 from locks import release, require_lock
+from remaining_svc import recompute_remaining
 
 router = APIRouter(tags=["confirm"])
 
@@ -49,10 +50,21 @@ def confirm_hold(body: ConfirmIn, authorization: AuthHeader = None):
                     "UPDATE holds SET status='已过期' WHERE id=?", (hold["id"],)
                 )
                 write_audit(conn, user, "hold_expire", str(hold["id"]), {})
+                recompute_remaining(conn, slot["id"])
                 conn.commit()
                 raise HTTPException(409, "占位已过期")
-            remain = int(slot["capacity"]) - int(slot["booked"])
-            if hold["seats"] > remain:
+            # 已订 + 自身待确认已由本单占用，仅需校验其余待确认不超额
+            others = conn.execute(
+                "SELECT COALESCE(SUM(seats),0) s FROM holds "
+                "WHERE slot_id=? AND status='占位中' AND id<>?",
+                (slot["id"], hold["id"]),
+            ).fetchone()["s"]
+            if (
+                int(slot["capacity"])
+                - int(slot["booked"])
+                - int(others)
+                < int(hold["seats"])
+            ):
                 raise HTTPException(409, "确认时容量不足，请释放或改候补")
             now = datetime.now().isoformat(timespec="seconds")
             cur = conn.execute(
@@ -82,8 +94,20 @@ def confirm_hold(body: ConfirmIn, authorization: AuthHeader = None):
                 hold["party_key"],
                 {"booking_id": cur.lastrowid, "gen": slot["generation"]},
             )
+            remaining = recompute_remaining(conn, slot["id"])
             conn.commit()
-            return {"ok": True, "booking_id": cur.lastrowid, "snapshot_gen": slot["generation"]}
+            return {
+                "ok": True,
+                "booking_id": cur.lastrowid,
+                "snapshot_gen": slot["generation"],
+                "remaining": remaining,
+            }
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             release(conn, lock_key, user)
             conn.commit()

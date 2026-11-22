@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from auth import AuthHeader, require_user, require_writer
 from db import connect, write_audit
 from locks import release, require_lock
+from remaining_svc import pending_seats, read_remaining_locked, recompute_remaining
 
 router = APIRouter(tags=["holds"])
 
@@ -21,11 +22,14 @@ class HoldIn(BaseModel):
 
 @router.get("/api/holds")
 def list_holds(authorization: AuthHeader = None):
-    require_user(authorization)
-    with connect() as conn:
+    user = require_user(authorization)
+    with read_remaining_locked(user) as conn:
         rows = conn.execute(
-            """SELECT h.*, s.code AS slot_code FROM holds h
-               JOIN slots s ON s.id=h.slot_id ORDER BY h.id DESC LIMIT 200"""
+            """SELECT h.*, s.code AS slot_code, s.title AS slot_title,
+                      s.capacity AS slot_capacity, s.booked AS slot_booked,
+                      s.remaining AS remaining
+               FROM holds h JOIN slots s ON s.id=h.slot_id
+               ORDER BY h.id DESC LIMIT 200"""
         ).fetchall()
         return {"items": [dict(r) for r in rows]}
 
@@ -44,12 +48,8 @@ def create_hold(body: HoldIn, authorization: AuthHeader = None):
                 raise HTTPException(404, "档期不存在")
             if slot["status"] != "开放":
                 raise HTTPException(409, "档期未开放，禁止占位")
-            remain = int(slot["capacity"]) - int(slot["booked"])
-            pending = conn.execute(
-                "SELECT COALESCE(SUM(seats),0) s FROM holds WHERE slot_id=? AND status='占位中'",
-                (slot["id"],),
-            ).fetchone()["s"]
-            free = remain - int(pending)
+            pending = pending_seats(conn, slot["id"])
+            free = int(slot["capacity"]) - int(slot["booked"]) - pending
             now = datetime.now().isoformat(timespec="seconds")
             expire = (datetime.now() + timedelta(minutes=30)).isoformat(timespec="seconds")
             if body.seats > free:
@@ -65,22 +65,37 @@ def create_hold(body: HoldIn, authorization: AuthHeader = None):
                     body.party_key,
                     {"slot": body.slot_code, "free": free, "want": body.seats},
                 )
+                recompute_remaining(conn, slot["id"])
                 conn.commit()
                 return {"disposition": "候补", "free": free}
-            cur = conn.execute(
+            conn.execute(
                 """INSERT INTO holds(slot_id,party_key,seats,status,expire_at,created_at)
                    VALUES (?,?,?,?,?,?)""",
                 (slot["id"], body.party_key, body.seats, "占位中", expire, now),
             )
+            hold_id = conn.execute("SELECT last_insert_rowid() i").fetchone()["i"]
             write_audit(
                 conn,
                 user,
                 "hold_create",
                 body.party_key,
-                {"slot": body.slot_code, "seats": body.seats, "hold_id": cur.lastrowid},
+                {"slot": body.slot_code, "seats": body.seats, "hold_id": hold_id},
             )
+            remaining = recompute_remaining(conn, slot["id"])
             conn.commit()
-            return {"disposition": "占位", "hold_id": cur.lastrowid, "expire_at": expire}
+            return {
+                "disposition": "占位",
+                "hold_id": hold_id,
+                "expire_at": expire,
+                "remaining": remaining,
+            }
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            # 甲路径：重算/写回失败 → 整个业务事务回滚，展示余席滚回旧值
+            conn.rollback()
+            raise
         finally:
             release(conn, lock_key, user)
             conn.commit()
